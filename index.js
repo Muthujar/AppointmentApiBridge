@@ -13,11 +13,40 @@ const UPSTREAM_API_BASE = (
 ).replace(/\/+$/, '');
 
 const httpsAgent = new https.Agent({
-  rejectUnauthorized: false,
+  rejectUnauthorized: true,
 });
 
 const app = express();
 app.use(express.json());
+
+app.use((req, res, next) => {
+  const start = Date.now();
+  const ts = () => new Date().toISOString();
+
+  const body =
+    req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0
+      ? ` | body: ${JSON.stringify(req.body)}`
+      : '';
+
+  console.log(`${ts()} → ${req.method} ${req.originalUrl}${body}`);
+
+  const origJson = res.json.bind(res);
+  res.json = function logJsonResponse(payload) {
+    let serialized;
+    try {
+      serialized =
+        typeof payload === 'string' ? payload : JSON.stringify(payload);
+    } catch {
+      serialized = '[could not serialize response]';
+    }
+    console.log(
+      `${ts()} ← HTTP ${res.statusCode} | ${serialized} | ${Date.now() - start}ms`
+    );
+    return origJson(payload);
+  };
+
+  next();
+});
 
 app.use(
   rateLimit({
@@ -106,11 +135,16 @@ async function handleCheckSlot(req, res) {
     const { status, data } = await upstreamJson('GET', url);
     return res.status(status).json(data);
   } catch (err) {
-    return sendUpstreamError(res, err, 'check-slot:');
+    return sendUpstreamError(res, err, 'slots/check:');
   }
 }
 
-app.get('/check-slot', requireApiKey, handleCheckSlot);
+// Legacy path → canonical (same query string)
+app.get('/check-slot', (req, res) => {
+  const q = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+  res.redirect(307, '/slots/check' + q);
+});
+
 app.get('/slots/check', requireApiKey, handleCheckSlot);
 
 async function handleBookAppointment(req, res) {
@@ -147,7 +181,7 @@ async function handleBookAppointment(req, res) {
     });
     return res.status(status).json(data);
   } catch (err) {
-    return sendUpstreamError(res, err, 'book-appointment:');
+    return sendUpstreamError(res, err, 'bookings:');
   }
 }
 
@@ -178,72 +212,91 @@ app.get('/messages/unsent-reminders', requireApiKey, async (req, res) => {
   }
 });
 
-app.post(
-  '/bookings/:appt_id/confirm',
-  requireApiKey,
-  async (req, res) => {
-    const apptId = (req.params.appt_id || '').trim();
-    if (!apptId) {
-      return res.status(400).json({ error: 'Missing or invalid appt_id' });
-    }
+function apptIdFromQuery(req) {
+  const q = req.query || {};
+  const raw = q.appt_id ?? q.apptId ?? q.Appt_ID;
+  return raw === undefined || raw === null ? '' : String(raw).trim();
+}
 
-    const url = `${UPSTREAM_API_BASE}/bookings/${encodeURIComponent(
-      apptId
-    )}/confirm/`;
-
-    try {
-      const { status, data } = await upstreamJson('POST', url);
-      return res.status(status).json(data);
-    } catch (err) {
-      return sendUpstreamError(res, err, 'booking confirm:');
-    }
-  }
-);
-
-app.post(
-  '/bookings/:appt_id/reschedule',
-  requireApiKey,
-  async (req, res) => {
-    const apptId = (req.params.appt_id || '').trim();
-    if (!apptId) {
-      return res.status(400).json({ error: 'Missing or invalid appt_id' });
-    }
-
-    const body = req.body && typeof req.body === 'object' ? req.body : {};
-    const new_date = body.new_date ?? body.newDate;
-    const new_time = body.new_time ?? body.newTime;
-    const missing = missingFields(['new_date', 'new_time'], {
-      new_date,
-      new_time,
-    });
-
-    if (missing.length) {
-      return res.status(400).json({
-        error:
-          'Missing required field(s): new_date and new_time (or newDate and newTime)',
-      });
-    }
-
-    const url = `${UPSTREAM_API_BASE}/bookings/${encodeURIComponent(
-      apptId
-    )}/reschedule/`;
-
-    try {
-      const { status, data } = await upstreamJson('POST', url, {
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ new_date, new_time }),
-      });
-      return res.status(status).json(data);
-    } catch (err) {
-      return sendUpstreamError(res, err, 'booking reschedule:');
-    }
-  }
-);
-
-app.post('/bookings/:appt_id/cancel', requireApiKey, async (req, res) => {
-  const apptId = (req.params.appt_id || '').trim();
+/** 5) Confirm — query: appt_id (or apptId, Appt_ID). Upstream: POST bookings/{id}/confirm/ */
+app.post('/bookings/confirm', requireApiKey, async (req, res) => {
+  const apptId = apptIdFromQuery(req);
   if (!apptId) {
-    return res.status(400).json({ error: 'Missing or invalid appt_id' });
+    return res.status(400).json({
+      error:
+        'Missing required query parameter: appt_id (or apptId / Appt_ID)',
+    });
+  }
+
+  const url = `${UPSTREAM_API_BASE}/bookings/${encodeURIComponent(
+    apptId
+  )}/confirm/`;
+
+  try {
+    const { status, data } = await upstreamJson('POST', url);
+    return res.status(status).json(data);
+  } catch (err) {
+    return sendUpstreamError(res, err, 'booking confirm:');
+  }
+});
+
+/** 6) Reschedule — query: appt_id, new_date & new_time (or newDate & newTime); JSON body also accepted. Upstream: POST bookings/{id}/reschedule/ */
+app.post('/bookings/reschedule', requireApiKey, async (req, res) => {
+  const apptId = apptIdFromQuery(req);
+  if (!apptId) {
+    return res.status(400).json({
+      error:
+        'Missing required query parameter: appt_id (or apptId / Appt_ID)',
+    });
+  }
+
+  const q = req.query || {};
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const new_date =
+    body.new_date ??
+    body.newDate ??
+    q.new_date ??
+    q.newDate;
+  const new_time =
+    body.new_time ??
+    body.newTime ??
+    q.new_time ??
+    q.newTime;
+  const missing = missingFields(['new_date', 'new_time'], {
+    new_date,
+    new_time,
+  });
+
+  if (missing.length) {
+    return res.status(400).json({
+      error:
+        'Missing new_date and new_time: pass as query (?new_date=&new_time=) or JSON body (new_date/new_time or newDate/newTime)',
+    });
+  }
+
+  const url = `${UPSTREAM_API_BASE}/bookings/${encodeURIComponent(
+    apptId
+  )}/reschedule/`;
+
+  try {
+    const { status, data } = await upstreamJson('POST', url, {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_date, new_time }),
+    });
+    return res.status(status).json(data);
+  } catch (err) {
+    return sendUpstreamError(res, err, 'booking reschedule:');
+  }
+});
+
+/** 7) Cancel — query: appt_id (or apptId, Appt_ID). Upstream: POST bookings/{id}/cancel/ */
+app.post('/bookings/cancel', requireApiKey, async (req, res) => {
+  const apptId = apptIdFromQuery(req);
+  if (!apptId) {
+    return res.status(400).json({
+      error:
+        'Missing required query parameter: appt_id (or apptId / Appt_ID)',
+    });
   }
 
   const url = `${UPSTREAM_API_BASE}/bookings/${encodeURIComponent(
