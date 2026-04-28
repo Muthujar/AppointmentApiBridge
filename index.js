@@ -12,9 +12,9 @@ const UPSTREAM_API_BASE = (
   'https://inyeonapi.beautecloud.com/api/v1/external'
 ).replace(/\/+$/, '');
 
-// const httpsAgent = new https.Agent({
-//   rejectUnauthorized: true,
-// });
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: true,
+});
 
 const app = express();
 app.use(express.json());
@@ -92,7 +92,7 @@ async function upstreamJson(method, url, options = {}) {
     method,
     headers,
     body: options.body,
-    // agent: httpsAgent,
+    agent: httpsAgent,
   });
 
   const text = await res.text();
