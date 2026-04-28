@@ -92,7 +92,7 @@ async function upstreamJson(method, url, options = {}) {
     method,
     headers,
     body: options.body,
-    agent: httpsAgent,
+    // agent: httpsAgent,
   });
 
   const text = await res.text();
