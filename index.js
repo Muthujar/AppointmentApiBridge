@@ -13,7 +13,7 @@ const UPSTREAM_API_BASE = (
 ).replace(/\/+$/, '');
 
 const httpsAgent = new https.Agent({
-  rejectUnauthorized: true,
+  rejectUnauthorized: false,
 });
 
 const app = express();
